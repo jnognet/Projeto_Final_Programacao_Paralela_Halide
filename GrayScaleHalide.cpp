@@ -1,5 +1,8 @@
 #define BUILD_HALIDE_GRAYSCALE
 
+#include <stdio.h>
+#include <string>
+
 #include "GrayScaleHalide.h"
 
 #include "Halide.h"
@@ -68,13 +71,12 @@ void convertHalide2Mat(const Buffer<uint8_t>& src, cv::Mat& dest)
     }
 }
 
-extern "C" cv::Mat EXP_HALIDE_GRAYSCALE grayScaleWithHalide(cv::Mat image)
+extern "C" EXP_HALIDECPU_GRAYSCALE bool grayScaleWithHalideCPU(std::string file_src, std::string file_dst)
 {    
-    Halide::Buffer<uint8_t> input(image.cols, image.rows, image.channels());
-    convertMat2Halide(image, input);
+    Halide::Buffer<uint8_t> input = load_image(file_src);
 
 	Halide::Var x, y, c;
-	Halide::Func grayscale("grayscale");
+	Halide::Func grayscale;
 
 	grayscale(x, y, c) = Halide::cast<uint8_t>(
 		min(
@@ -96,8 +98,60 @@ extern "C" cv::Mat EXP_HALIDE_GRAYSCALE grayScaleWithHalide(cv::Mat image)
 
 	Halide::Buffer<uint8_t> output = grayscale.realize({ input.width(), input.height(), input.channels() });
 
-    cv::Mat outimage(cv::Size(output.width(), output.height()), CV_MAKETYPE(CV_8U, output.channels()));
-    convertHalide2Mat(output, outimage);
+    save_image(output, file_dst);
 
-	return outimage;
+	return true;
+}
+
+Target find_gpu_target() {
+    Target target = get_host_target();
+
+    std::vector<Target::Feature> features_to_try;
+    features_to_try.push_back(Target::OpenCL);
+
+    for (Target::Feature f : features_to_try) {
+        Target new_target = target.with_feature(f);
+        if (host_supports_target_device(new_target)) {
+            return new_target;
+        }
+    }
+    return target;
+}
+
+extern "C" EXP_HALIDEGPU_GRAYSCALE bool grayScaleWithHalideGPU(std::string file_src, std::string file_dst)
+{
+    Target target = find_gpu_target();
+    if (!target.has_gpu_feature()) {
+        return false;
+    }
+
+    Halide::Var x, y, c, i;
+    Halide::Func grayscale, graycalc, lut;
+    Halide::Var block, thread;
+    Halide::Buffer<uint8_t> input = load_image(file_src);
+
+    // kernel
+    lut(i) = Halide::cast<uint8_t>(i);
+    graycalc(x, y, c) = Halide::cast<uint8_t>(
+            min(
+                0.299f * input(x, y, 0) + 0.587f * input(x, y, 1) + 0.114f * input(x, y, 2), 255.0f
+            )
+        );
+    grayscale(x, y, c) = lut(graycalc(x, y, c));
+
+    // schedule_for_gpu    
+    lut.compute_root();
+    lut.split(i, block, thread, 1024);
+    lut.gpu_blocks(block)
+        .gpu_threads(thread);
+    grayscale.compile_jit(target);
+
+    Buffer<uint8_t> output(input.width(), input.height(), input.channels());    
+    // run
+    grayscale.realize(output);
+    output.copy_to_host();
+
+    save_image(output, file_dst);
+
+    return true;
 }
