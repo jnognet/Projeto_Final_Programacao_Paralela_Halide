@@ -1,7 +1,9 @@
 #define BUILD_HALIDE_GRAYSCALE
 
 #include <stdio.h>
+#include <iostream>
 #include <string>
+#include <filesystem>
 
 #include "GrayScaleHalide.h"
 
@@ -74,16 +76,19 @@ void convertHalide2Mat(const Buffer<uint8_t>& src, cv::Mat& dest)
 extern "C" EXP_HALIDECPU_GRAYSCALE bool grayScaleWithHalideCPU(std::string file_src, std::string file_dst)
 {    
     Halide::Buffer<uint8_t> input = load_image(file_src);
+    std::filesystem::remove(file_dst);
 
 	Halide::Var x, y, c;
 	Halide::Func grayscale;
 
+    // kernel
 	grayscale(x, y, c) = Halide::cast<uint8_t>(
 		min(
 			0.299f * input(x, y, 0) + 0.587f * input(x, y, 1) +	0.114f * input(x, y, 2), 255.0f
 		)
 	);
 
+    // schedule_for_gpu
 	Halide::Var x_outer, y_outer, x_inner, y_inner, tile_index;
 	grayscale
 		.tile(x, y, x_outer, y_outer, x_inner, y_inner, 64, 64)
@@ -96,6 +101,7 @@ extern "C" EXP_HALIDECPU_GRAYSCALE bool grayScaleWithHalideCPU(std::string file_
 		.vectorize(x_vectors)
 		.unroll(y_pairs);
 
+    // run
 	Halide::Buffer<uint8_t> output = grayscale.realize({ input.width(), input.height(), input.channels() });
 
     save_image(output, file_dst);
@@ -125,32 +131,32 @@ extern "C" EXP_HALIDEGPU_GRAYSCALE bool grayScaleWithHalideGPU(std::string file_
         return false;
     }
 
-    Halide::Var x, y, c, i;
+    Halide::Var x, y, c, i, xo, yo, xi, yi;
     Halide::Func grayscale, graycalc, lut;
     Halide::Var block, thread;
     Halide::Buffer<uint8_t> input = load_image(file_src);
+    std::filesystem::remove(file_dst);
 
     // kernel
-    lut(i) = Halide::cast<uint8_t>(i);
-    graycalc(x, y, c) = Halide::cast<uint8_t>(
-            min(
-                0.299f * input(x, y, 0) + 0.587f * input(x, y, 1) + 0.114f * input(x, y, 2), 255.0f
-            )
-        );
-    grayscale(x, y, c) = lut(graycalc(x, y, c));
+    grayscale(x, y, c) = Halide::cast<uint8_t>(
+        min(
+            0.299f * input(x, y, 0) + 0.587f * input(x, y, 1) + 0.114f * input(x, y, 2), 255.0f
+        )
+    );
 
-    // schedule_for_gpu    
-    lut.compute_root();
-    lut.split(i, block, thread, 1024);
-    lut.gpu_blocks(block)
-        .gpu_threads(thread);
+    // schedule_for_gpu
+    grayscale.reorder(c, x, y)
+             .bound(c, 0, 3)
+             .unroll(c);
+    grayscale.gpu_tile(x, y, xo, yo, xi, yi, 8, 8);
     grayscale.compile_jit(target);
 
     Buffer<uint8_t> output(input.width(), input.height(), input.channels());    
+
     // run
     grayscale.realize(output);
     output.copy_to_host();
-
+    
     save_image(output, file_dst);
 
     return true;
