@@ -88,7 +88,11 @@ extern "C" EXP_HALIDECPU_GRAYSCALE bool grayScaleWithHalideCPU(std::string file_
 		)
 	);
 
-    // schedule_for_gpu
+    // schedule_for_cpu
+    grayscale.reorder(c, x, y)
+        .bound(c, 0, 3)
+        .unroll(c);
+
 	Halide::Var x_outer, y_outer, x_inner, y_inner, tile_index;
 	grayscale
 		.tile(x, y, x_outer, y_outer, x_inner, y_inner, 64, 64)
@@ -145,10 +149,23 @@ extern "C" EXP_HALIDEGPU_GRAYSCALE bool grayScaleWithHalideGPU(std::string file_
     );
 
     // schedule_for_gpu
+    
     grayscale.reorder(c, x, y)
              .bound(c, 0, 3)
              .unroll(c);
-    grayscale.gpu_tile(x, y, xo, yo, xi, yi, 8, 8);
+
+    Halide::Var x_outer, y_outer, x_inner, y_inner, tile_index;
+    grayscale
+        .gpu_tile(x, y, x_outer, y_outer, x_inner, y_inner, 64, 64)
+        .fuse(x_outer, y_outer, tile_index)
+        .parallel(tile_index);
+
+    Halide::Var x_inner_outer, y_inner_outer, x_vectors, y_pairs;
+    grayscale
+        .gpu_tile(x_inner, y_inner, x_inner_outer, y_inner_outer, x_vectors, y_pairs, 4, 2)
+        .vectorize(x_vectors)
+        .unroll(y_pairs);    
+
     grayscale.compile_jit(target);
 
     Buffer<uint8_t> output(input.width(), input.height(), input.channels());    
