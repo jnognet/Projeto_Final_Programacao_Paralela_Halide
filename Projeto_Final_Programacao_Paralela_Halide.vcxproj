@@ -139,10 +139,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="GrayScaleHalide.h" />
+    <ClInclude Include="FilterHalide.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="GrayScaleHalide.cpp" />
+    <ClCompile Include="FilterHalide.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

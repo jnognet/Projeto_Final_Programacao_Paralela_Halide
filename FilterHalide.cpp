@@ -1,11 +1,11 @@
-#define BUILD_HALIDE_GRAYSCALE
+#define BUILD_HALIDE
 
 #include <stdio.h>
 #include <iostream>
 #include <string>
 #include <filesystem>
 
-#include "GrayScaleHalide.h"
+#include "FilterHalide.h"
 
 #include "Halide.h"
 #include "halide_image_io.h"
@@ -73,6 +73,21 @@ void convertHalide2Mat(const Buffer<uint8_t>& src, cv::Mat& dest)
     }
 }
 
+Target find_gpu_target() {
+    Target target = get_host_target();
+
+    std::vector<Target::Feature> features_to_try;
+    features_to_try.push_back(Target::OpenCL);
+
+    for (Target::Feature f : features_to_try) {
+        Target new_target = target.with_feature(f);
+        if (host_supports_target_device(new_target)) {
+            return new_target;
+        }
+    }
+    return target;
+}
+
 extern "C" EXP_HALIDECPU_GRAYSCALE bool grayScaleWithHalideCPU(std::string file_src, std::string file_dst)
 {    
     Halide::Buffer<uint8_t> input = load_image(file_src);
@@ -113,21 +128,6 @@ extern "C" EXP_HALIDECPU_GRAYSCALE bool grayScaleWithHalideCPU(std::string file_
 	return true;
 }
 
-Target find_gpu_target() {
-    Target target = get_host_target();
-
-    std::vector<Target::Feature> features_to_try;
-    features_to_try.push_back(Target::OpenCL);
-
-    for (Target::Feature f : features_to_try) {
-        Target new_target = target.with_feature(f);
-        if (host_supports_target_device(new_target)) {
-            return new_target;
-        }
-    }
-    return target;
-}
-
 extern "C" EXP_HALIDEGPU_GRAYSCALE bool grayScaleWithHalideGPU(std::string file_src, std::string file_dst)
 {
     Target target = find_gpu_target();
@@ -148,8 +148,7 @@ extern "C" EXP_HALIDEGPU_GRAYSCALE bool grayScaleWithHalideGPU(std::string file_
         )
     );
 
-    // schedule_for_gpu
-    
+    // schedule_for_gpu    
     grayscale.reorder(c, x, y)
              .bound(c, 0, 3)
              .unroll(c);
@@ -174,6 +173,88 @@ extern "C" EXP_HALIDEGPU_GRAYSCALE bool grayScaleWithHalideGPU(std::string file_
     grayscale.realize(output);
     output.copy_to_host();
     
+    save_image(output, file_dst);
+
+    return true;
+}
+
+extern "C" EXP_HALIDECPU_COMPLEMENT bool complementWithHalideCPU(std::string file_src, std::string file_dst)
+{
+    Halide::Buffer<uint8_t> input = load_image(file_src);
+    std::filesystem::remove(file_dst);
+
+    Halide::Var x, y, c;
+    Halide::Func complement;
+
+    // kernel
+    complement(x, y, c) = Halide::cast<uint8_t>(255 - input(x, y, c));
+
+    // schedule_for_cpu
+    complement.reorder(c, x, y)
+        .bound(c, 0, 3)
+        .unroll(c);
+
+    Halide::Var x_outer, y_outer, x_inner, y_inner, tile_index;
+    complement
+        .tile(x, y, x_outer, y_outer, x_inner, y_inner, 64, 64)
+        .fuse(x_outer, y_outer, tile_index)
+        .parallel(tile_index);
+
+    Halide::Var x_inner_outer, y_inner_outer, x_vectors, y_pairs;
+    complement
+        .tile(x_inner, y_inner, x_inner_outer, y_inner_outer, x_vectors, y_pairs, 4, 2)
+        .vectorize(x_vectors)
+        .unroll(y_pairs);
+
+    // run
+    Halide::Buffer<uint8_t> output = complement.realize({ input.width(), input.height(), input.channels() });
+
+    save_image(output, file_dst);
+
+    return true;
+}
+
+extern "C" EXP_HALIDEGPU_COMPLEMENT bool complementWithHalideGPU(std::string file_src, std::string file_dst)
+{
+    Target target = find_gpu_target();
+    if (!target.has_gpu_feature()) {
+        return false;
+    }
+
+    Halide::Var x, y, c, i, xo, yo, xi, yi;
+    Halide::Func complement, graycalc, lut;
+    Halide::Var block, thread;
+    Halide::Buffer<uint8_t> input = load_image(file_src);
+    std::filesystem::remove(file_dst);
+
+    // kernel
+    complement(x, y, c) = Halide::cast<uint8_t>(255 - input(x, y, c));
+
+    // schedule_for_gpu    
+    complement.reorder(c, x, y)
+        .bound(c, 0, 3)
+        .unroll(c);
+
+    Halide::Var x_outer, y_outer, x_inner, y_inner, tile_index;
+    complement
+        .gpu_tile(x, y, x_outer, y_outer, x_inner, y_inner, 64, 64)
+        .fuse(x_outer, y_outer, tile_index)
+        .parallel(tile_index);
+
+    Halide::Var x_inner_outer, y_inner_outer, x_vectors, y_pairs;
+    complement
+        .gpu_tile(x_inner, y_inner, x_inner_outer, y_inner_outer, x_vectors, y_pairs, 4, 2)
+        .vectorize(x_vectors)
+        .unroll(y_pairs);
+
+    complement.compile_jit(target);
+
+    Buffer<uint8_t> output(input.width(), input.height(), input.channels());
+
+    // run
+    complement.realize(output);
+    output.copy_to_host();
+
     save_image(output, file_dst);
 
     return true;
